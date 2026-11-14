@@ -110,6 +110,14 @@ describe("agent/agent-service-config", () => {
         .VERYFRONT_API_TOKEN,
       "token-1",
     );
+    // A blank token, empty or whitespace-only, is unset, as the CLI and SDK read it: the key stands in.
+    for (const blank of ["", "   "]) {
+      assertEquals(
+        parseHostedAgentServiceConfig({ VERYFRONT_API_TOKEN: blank, VERYFRONT_API_KEY: "key-1" })
+          .VERYFRONT_API_TOKEN,
+        "key-1",
+      );
+    }
     // Any token file selector, a blank one included, is the credential: the key never stands in for it.
     assertEquals(
       parseHostedAgentServiceConfig({ VERYFRONT_API_TOKEN_FILE: "", VERYFRONT_API_KEY: "key-1" })
