@@ -11,6 +11,7 @@ import { basename, join } from "veryfront/platform/path";
 import { createFileSystem, cwd, getEnv } from "veryfront/platform";
 import { type EnvironmentConfig, getApiTokenEnv, getEnvironmentConfig } from "veryfront/config";
 import { getEnvSource } from "veryfront/utils/env-loader";
+import { INVALID_ARGUMENT } from "veryfront/errors";
 import { cliLogger, VERSION } from "#cli/utils";
 import { readToken } from "../auth/token-store.ts";
 import { ensureAuthenticated } from "../auth/login.ts";
@@ -857,6 +858,29 @@ export function resolveConfigWithAuthDetails(
   authOptions: { transport?: typeof fetch } = {},
 ): Promise<ResolvedConfigDetails> {
   return resolveConfigByMode(projectDir, env, true, true, true, authOptions);
+}
+
+export const NO_LINKED_PROJECT_MESSAGE =
+  "No project is linked to this folder. Pass `--project <slug>` (the slug is on the project's Settings page), or run `veryfront pull <slug>` to link one.";
+
+/**
+ * Resolve config for a command that reads or writes one existing project
+ * (`files`, `knowledge`, `uploads`). `projectSlug` is the command's
+ * `--project` value. Without it, the project must come from a link,
+ * configuration, or the environment: the folder or package name is a guess
+ * that names a project only by chance, so the command stops before it reaches
+ * the API.
+ */
+export async function resolveLinkedProjectConfigWithAuth(
+  projectDir?: string,
+  projectSlug?: string,
+): Promise<ResolvedConfig> {
+  const { config, projectReferenceSource } = await resolveConfigWithAuthDetails(projectDir);
+  if (projectSlug) return { ...config, projectSlug };
+  if (projectReferenceSource.kind === "inferred") {
+    throw INVALID_ARGUMENT.create({ detail: NO_LINKED_PROJECT_MESSAGE });
+  }
+  return config;
 }
 
 function resolveConfigByMode(

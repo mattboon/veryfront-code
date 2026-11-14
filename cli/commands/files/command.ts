@@ -13,8 +13,7 @@ import { parseArgsOrThrow } from "#cli/shared/args";
 import {
   type ApiClient,
   createApiClient,
-  resolveConfigWithAuthDetails,
-  type ResolvedConfig,
+  resolveLinkedProjectConfigWithAuth,
 } from "#cli/shared/config";
 import type { ParsedArgs } from "#cli/shared/types";
 import { printJson } from "../../shared/json-output.ts";
@@ -244,29 +243,6 @@ export async function deleteRemoteFile(
   await client.delete(buildRemoteFileUrl(projectSlug, remotePath));
 }
 
-const NO_LINKED_PROJECT_MESSAGE =
-  "No project is linked to this folder. Pass `--project <slug>` (the slug is on the project's Settings page), or run `veryfront pull <slug>` to link one.";
-
-/**
- * Resolve the project a files command reads or writes. With no `--project`,
- * the project must come from a link, configuration, or the environment: the
- * folder or package name is a guess that names a project only by chance, so
- * the command stops before it reaches the API.
- */
-async function resolveFilesConfig(options: {
-  projectDir?: string;
-  projectSlug?: string;
-}): Promise<ResolvedConfig> {
-  const { config, projectReferenceSource } = await resolveConfigWithAuthDetails(
-    options.projectDir,
-  );
-  if (options.projectSlug) return { ...config, projectSlug: options.projectSlug };
-  if (projectReferenceSource.kind === "inferred") {
-    throw INVALID_ARGUMENT.create({ detail: NO_LINKED_PROJECT_MESSAGE });
-  }
-  return config;
-}
-
 export async function filesCommand(args: ParsedArgs): Promise<void> {
   const subcommand = typeof args._[1] === "string" ? args._[1] : undefined;
 
@@ -279,7 +255,10 @@ export async function filesCommand(args: ParsedArgs): Promise<void> {
     switch (subcommand) {
       case "list": {
         const options = parseArgsOrThrow(parseFilesListArgs, "files list", args);
-        const config = await resolveFilesConfig(options);
+        const config = await resolveLinkedProjectConfigWithAuth(
+          options.projectDir,
+          options.projectSlug,
+        );
 
         const client = createApiClient(config);
         const files = await listRemoteFiles(client, config.projectSlug, options);
@@ -303,7 +282,10 @@ export async function filesCommand(args: ParsedArgs): Promise<void> {
 
       case "get": {
         const options = parseArgsOrThrow(parseFilesGetArgs, "files get", args);
-        const config = await resolveFilesConfig(options);
+        const config = await resolveLinkedProjectConfigWithAuth(
+          options.projectDir,
+          options.projectSlug,
+        );
 
         const client = createApiClient(config);
         const content = await getRemoteFile(client, config.projectSlug, options.remotePath);
@@ -338,7 +320,10 @@ export async function filesCommand(args: ParsedArgs): Promise<void> {
 
       case "put": {
         const options = parseArgsOrThrow(parseFilesPutArgs, "files put", args);
-        const config = await resolveFilesConfig(options);
+        const config = await resolveLinkedProjectConfigWithAuth(
+          options.projectDir,
+          options.projectSlug,
+        );
 
         const client = createApiClient(config);
         const result = await putRemoteFileFromLocal(
@@ -362,7 +347,10 @@ export async function filesCommand(args: ParsedArgs): Promise<void> {
       case "delete":
       case "rm": {
         const options = parseArgsOrThrow(parseFilesDeleteArgs, "files delete", args);
-        const config = await resolveFilesConfig(options);
+        const config = await resolveLinkedProjectConfigWithAuth(
+          options.projectDir,
+          options.projectSlug,
+        );
 
         const client = createApiClient(config);
         await deleteRemoteFile(client, config.projectSlug, options.remotePath);
