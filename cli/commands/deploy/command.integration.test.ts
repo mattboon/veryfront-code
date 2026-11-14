@@ -1,7 +1,8 @@
 import "#veryfront/schemas/_test-setup.ts";
 
 import { _resetEnvironmentConfig } from "#veryfront/config/environment-config.ts";
-import { assertEquals, assertRejects } from "#veryfront/testing/assert.ts";
+import { assertEquals, assertInstanceOf, assertRejects } from "#veryfront/testing/assert.ts";
+import { VeryfrontError } from "veryfront/errors";
 import { it } from "#veryfront/testing/bdd.ts";
 import { withMockFetch } from "#veryfront/testing/mock-fetch.ts";
 import { makeTempDir } from "#veryfront/testing/deno-compat.ts";
@@ -1735,7 +1736,7 @@ it("deploys production from a dirty worktree when the pushed digest matches the 
   }
 });
 
-it("models an inferred missing project during dry-run deploy", async () => {
+it("refuses an unlinked folder during dry-run deploy before any request", async () => {
   const projectDir = await Deno.makeTempDir();
   const envKeys = [
     "VERYFRONT_API_TOKEN",
@@ -1759,15 +1760,26 @@ it("models an inferred missing project during dry-run deploy", async () => {
       const url = new URL(request.url);
       requests.push(`${request.method} ${url.pathname}`);
       return Promise.resolve(Response.json({ message: "not found" }, { status: 404 }));
-    }, () =>
-      deployCommand({
-        projectDir,
-        branch: "main",
-        env: "production",
-        dryRun: true,
-        force: true,
-        quiet: true,
-      }));
+    }, async () => {
+      const error = await assertRejects(
+        () =>
+          deployCommand({
+            projectDir,
+            branch: "main",
+            env: "production",
+            dryRun: true,
+            force: true,
+            quiet: true,
+          }),
+        VeryfrontError,
+      );
+      assertInstanceOf(error, VeryfrontError);
+      assertEquals(error.slug, "invalid-argument");
+      assertEquals(
+        error.message,
+        "No Veryfront project is linked to this folder. Run veryfront up to create one, or pass --project <slug> to deploy an existing project.",
+      );
+    });
 
     assertEquals(requests, []);
   } finally {
@@ -1898,6 +1910,8 @@ it("does not claim dry-run deploy would push source when source push is skipped"
           force: true,
           quiet: false,
           skipSourcePush: true,
+          // The operator confirmed creating the project named after the folder.
+          inferredProject: () => Promise.resolve(true),
         }),
     );
 
@@ -1918,174 +1932,51 @@ it("does not claim dry-run deploy would push source when source push is skipped"
   }
 });
 
-it("uses an alternative slug when inferred first deploy project creation conflicts", async () => {
+it("refuses an inferred first deploy without creating a project or a link", async () => {
   const projectDir = await Deno.makeTempDir();
   const envKeys = [
-    // See withDeployEnv: the temp repository below is not the CI checkout.
-    "GITHUB_SHA",
     "VERYFRONT_API_TOKEN",
     "VERYFRONT_API_URL",
     "VERYFRONT_PROJECT_SLUG",
     "VERYFRONT_PROJECT_ID",
   ];
   const savedEnv = envKeys.map((key) => Deno.env.get(key));
-  const createSlugs: string[] = [];
-  let environmentUrlReads = 0;
-  let inferredProjectLookups = 0;
+  const requests: string[] = [];
 
   try {
-    Deno.env.delete("GITHUB_SHA");
-    await Deno.writeTextFile(`${projectDir}/.gitignore`, ".veryfront/\n");
     await Deno.writeTextFile(`${projectDir}/package.json`, '{"name":"taken-app"}\n');
     await Deno.writeTextFile(`${projectDir}/app.ts`, "export const value = 1;\n");
-    const actualSha = await commitProject(projectDir);
-    const sourceDigest = await computeSourceDigest([
-      { path: "app.ts", content: "export const value = 1;\n" },
-    ]);
-
     Deno.env.set("VERYFRONT_API_TOKEN", "test-token");
     Deno.env.set("VERYFRONT_API_URL", "https://control.example.test/api");
     Deno.env.delete("VERYFRONT_PROJECT_SLUG");
     Deno.env.delete("VERYFRONT_PROJECT_ID");
     _resetEnvironmentConfig();
 
-    await withMockFetch(async (input: string | URL | Request, init?: RequestInit) => {
+    const error = await withMockFetch((input: string | URL | Request, init?: RequestInit) => {
       const request = input instanceof Request ? input : new Request(input, init);
-      const url = new URL(request.url);
-
-      if (
-        request.method === "GET" &&
-        url.hostname.endsWith(".production.veryfront.com")
-      ) {
-        environmentUrlReads++;
-        return new Response("ready");
-      }
-      if (request.method === "GET" && url.pathname === "/api/projects/taken-app") {
-        inferredProjectLookups++;
-        return Response.json({ message: "not found" }, { status: 404 });
-      }
-      if (request.method === "POST" && url.pathname === "/api/projects") {
-        const body = await request.json() as { slug: string };
-        createSlugs.push(body.slug);
-        if (body.slug === "taken-app") {
-          return Response.json({ error: "taken" }, { status: 409 });
-        }
-        assertEquals(/^taken-app-[a-z0-9]{6}$/.test(body.slug), true);
-        await writePushReceipt(projectDir, {
-          controlPlane: "https://control.example.test/api",
-          projectId: PROJECT_ID,
-          projectSlug: body.slug,
-          branch: "main",
-          commitSha: actualSha,
-          sourceDigest,
-          clean: true,
-          pushedAt: "2026-07-10T09:20:00.000Z",
-        });
-        return Response.json({ id: PROJECT_ID }, { status: 201 });
-      }
-      if (request.method === "GET" && url.pathname.endsWith("/environments")) {
-        return Response.json({
-          data: [{
-            id: ENVIRONMENT_ID,
-            name: "production",
-            project_id: PROJECT_ID,
-            protected: false,
-            deployment: {
-              id: DEPLOYMENT_ID,
-              release: { id: RELEASE_ID, name: `github-main-${actualSha}` },
-            },
-          }],
-        });
-      }
-      if (request.method === "POST" && url.pathname.endsWith("/releases")) {
-        return Response.json({
-          id: RELEASE_ID,
-          name: `github-main-${actualSha}`,
-          version: "0.0.41",
-          project_id: PROJECT_ID,
-        }, { status: 201 });
-      }
-      if (request.method === "GET" && url.pathname.endsWith(`/releases/${RELEASE_ID}`)) {
-        return Response.json({
-          id: RELEASE_ID,
-          name: `github-main-${actualSha}`,
-          version: "0.0.41",
-          project_id: PROJECT_ID,
-        });
-      }
-      if (
-        request.method === "GET" &&
-        url.pathname.endsWith(`/releases/${RELEASE_ID}/files`)
-      ) {
-        return Response.json({
-          data: [{
-            path: "app.ts",
-            data: JSON.stringify({ body: "export const value = 1;\n", path: "app.ts" }),
-          }],
-          page_info: {},
-        });
-      }
-      if (
-        request.method === "GET" &&
-        url.pathname.endsWith(`/releases/${RELEASE_ID}/asset-manifest`)
-      ) {
-        return Response.json({
-          state: "ready",
-          manifest_version: 1,
-          manifest: {
-            schemaVersion: RELEASE_ASSET_MANIFEST_SCHEMA_VERSION,
-            projectId: PROJECT_ID,
-            releaseId: RELEASE_ID,
-            releaseVersion: 41,
-            manifestVersion: 1,
-            builderVersion: "test",
-            sourceContentHash: sourceDigest.slice("sha256:".length),
-            createdAt: "2026-07-10T09:20:00.000Z",
-            assetBasePath: "/_vf/assets",
-            modules: {},
-            css: [],
-            routes: {},
-            dependencyMode: "source",
-            dependencies: {},
-          },
-        });
-      }
-      if (request.method === "POST" && url.pathname.endsWith("/deployments")) {
-        return Response.json({
-          id: DEPLOYMENT_ID,
-          release_id: RELEASE_ID,
-          environment_id: ENVIRONMENT_ID,
-          routing_convergence: { status: "converged", acknowledged: 1, recipients: 1 },
-        }, { status: 201 });
-      }
-      if (request.method === "GET" && url.pathname.endsWith(`/deployments/${DEPLOYMENT_ID}`)) {
-        return Response.json({
-          id: DEPLOYMENT_ID,
-          release_id: RELEASE_ID,
-          environment_id: ENVIRONMENT_ID,
-        });
-      }
-      return Response.json({ message: "not found" }, { status: 404 });
+      requests.push(`${request.method} ${new URL(request.url).pathname}`);
+      return Promise.resolve(Response.json({ message: "not found" }, { status: 404 }));
     }, () =>
-      deployCommand({
-        projectDir,
-        branch: "main",
-        env: "production",
-        releaseName: `github-main-${actualSha}`,
-        dryRun: false,
-        force: true,
-        quiet: true,
-        skipSourcePush: true,
-      }));
+      assertRejects(
+        () =>
+          deployCommand({
+            projectDir,
+            branch: "main",
+            env: "production",
+            dryRun: false,
+            force: true,
+            quiet: true,
+          }),
+        VeryfrontError,
+      ));
 
-    assertEquals(createSlugs.length, 2);
-    assertEquals(inferredProjectLookups, 0);
-    assertEquals(environmentUrlReads, 0);
-    assertEquals(createSlugs[0], "taken-app");
-    assertEquals(/^taken-app-[a-z0-9]{6}$/.test(createSlugs[1] ?? ""), true);
-    const link = await readProjectLink(projectDir);
-    assertEquals(link?.projectId, PROJECT_ID);
-    assertEquals(link?.projectSlug, createSlugs[1]);
+    assertInstanceOf(error, VeryfrontError);
+    assertEquals(
+      error.message,
+      "No Veryfront project is linked to this folder. Run veryfront up to create one, or pass --project <slug> to deploy an existing project.",
+    );
+    assertEquals(requests, []);
+    assertEquals(await readProjectLink(projectDir), null);
     await assertRejects(
       () => Deno.stat(`${projectDir}/veryfront.json`),
       Deno.errors.NotFound,

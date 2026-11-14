@@ -9,6 +9,7 @@ import {
   canPersistAlternativeSlug,
   describeStaleProjectReference,
   getErrorStatus,
+  type InferredProjectChoice,
   projectApiReference,
   ProjectReferenceNotFoundError,
   type ProjectResolutionClient,
@@ -16,6 +17,7 @@ import {
   shouldPersistProjectLink,
   slugConflictAction,
   staleProjectReferenceContext,
+  UnlinkedProjectError,
 } from "./project-resolution.ts";
 import { ProjectSlugConflictError } from "./reserve-slug.ts";
 
@@ -389,7 +391,7 @@ describe("resolveOrCreateProject", () => {
     });
   });
 
-  describe("an inferred reference", () => {
+  describe("an inferred reference that the caller creates", () => {
     it("creates the project and writes the canonical link", async () => {
       await withTempDir(async (dir) => {
         const { client, calls } = fakeClient({
@@ -400,6 +402,7 @@ describe("resolveOrCreateProject", () => {
           config: config(),
           source: INFERRED,
           client,
+          inferredProject: "create",
         });
 
         assertEquals(outcome.kind, "created");
@@ -427,6 +430,7 @@ describe("resolveOrCreateProject", () => {
           config: config(),
           source: INFERRED,
           client,
+          inferredProject: "create",
         });
 
         if (outcome.kind !== "created") throw new Error("unreachable");
@@ -453,6 +457,7 @@ describe("resolveOrCreateProject", () => {
           config: config(),
           source: INFERRED,
           client,
+          inferredProject: "create",
         });
 
         if (outcome.kind !== "created") throw new Error("unreachable");
@@ -476,6 +481,7 @@ describe("resolveOrCreateProject", () => {
           config: config(),
           source: INFERRED,
           client,
+          inferredProject: "create",
           dryRun: true,
         });
 
@@ -500,6 +506,7 @@ describe("resolveOrCreateProject", () => {
               config: config(),
               source: INFERRED,
               client,
+              inferredProject: "create",
               allowAlternativeSlug: false,
             }),
           ProjectSlugConflictError,
@@ -508,6 +515,152 @@ describe("resolveOrCreateProject", () => {
         assertInstanceOf(error, ProjectSlugConflictError);
         assertEquals(error.slug, "my-app");
         assertEquals(error.message, 'Project slug "my-app" is already in use.');
+      });
+    });
+  });
+  describe("an inferred reference that the caller did not settle", () => {
+    it("refuses before any lookup, reservation or link", async () => {
+      await withTempDir(async (dir) => {
+        const { client, calls } = fakeClient({});
+        for (const dryRun of [false, true]) {
+          const error = await assertRejects(
+            () =>
+              resolveOrCreateProject({
+                projectDir: dir,
+                config: config(),
+                source: INFERRED,
+                client,
+                dryRun,
+              }),
+            UnlinkedProjectError,
+          );
+          assertInstanceOf(error, UnlinkedProjectError);
+          assertEquals(error.inferredSlug, "my-app");
+          assertEquals(error.declined, false);
+        }
+        assertEquals(calls, { getProject: [], reserveSlug: [] });
+        assertEquals(await linkExists(dir), false);
+      });
+    });
+  });
+
+  describe("an inferred reference that the caller confirms", () => {
+    function recordingConfirm(answer: boolean) {
+      const choices: InferredProjectChoice[] = [];
+      const confirm = (choice: InferredProjectChoice) => {
+        choices.push(choice);
+        return Promise.resolve(answer);
+      };
+      return { choices, confirm };
+    }
+
+    it("offers to create a missing project and creates exactly that slug", async () => {
+      await withTempDir(async (dir) => {
+        const { client, calls } = fakeClient({
+          getProjectError: notFound,
+          reserve: { slug: "my-app", projectId: "proj_new" },
+        });
+        const { choices, confirm } = recordingConfirm(true);
+        const outcome = await resolveOrCreateProject({
+          projectDir: dir,
+          config: config(),
+          source: INFERRED,
+          client,
+          inferredProject: confirm,
+        });
+
+        assertEquals(choices, [{ slug: "my-app", existing: null }]);
+        assertEquals(outcome.kind, "created");
+        assertEquals(calls.reserveSlug, [{ slug: "my-app", allowAlternativeSlug: false }]);
+        assertEquals(await readLink(dir), {
+          version: 1,
+          controlPlane: CONTROL_PLANE,
+          projectId: "proj_new",
+          projectSlug: "my-app",
+        });
+      });
+    });
+
+    it("offers the existing project with that slug and links it without creating one", async () => {
+      await withTempDir(async (dir) => {
+        const { client, calls } = fakeClient({ project: { id: "proj_mine", slug: "my-app" } });
+        const { choices, confirm } = recordingConfirm(true);
+        const outcome = await resolveOrCreateProject({
+          projectDir: dir,
+          config: config(),
+          source: INFERRED,
+          client,
+          inferredProject: confirm,
+        });
+
+        assertEquals(choices, [{ slug: "my-app", existing: { id: "proj_mine", slug: "my-app" } }]);
+        assertEquals(outcome.kind, "existing");
+        assertEquals(calls.reserveSlug, []);
+        assertEquals(await readLink(dir), {
+          version: 1,
+          controlPlane: CONTROL_PLANE,
+          projectId: "proj_mine",
+          projectSlug: "my-app",
+        });
+      });
+    });
+
+    it("refuses when the answer is no, and changes nothing", async () => {
+      await withTempDir(async (dir) => {
+        const { client, calls } = fakeClient({ getProjectError: notFound });
+        const { confirm } = recordingConfirm(false);
+        const error = await assertRejects(
+          () =>
+            resolveOrCreateProject({
+              projectDir: dir,
+              config: config(),
+              source: INFERRED,
+              client,
+              inferredProject: confirm,
+            }),
+          UnlinkedProjectError,
+        );
+
+        assertInstanceOf(error, UnlinkedProjectError);
+        assertEquals(error.declined, true);
+        assertEquals(calls.reserveSlug, []);
+        assertEquals(await linkExists(dir), false);
+      });
+    });
+
+    it("plans a confirmed create on a dry run without reserving or linking", async () => {
+      await withTempDir(async (dir) => {
+        const { client, calls } = fakeClient({ getProjectError: notFound });
+        const { confirm } = recordingConfirm(true);
+        const outcome = await resolveOrCreateProject({
+          projectDir: dir,
+          config: config(),
+          source: INFERRED,
+          client,
+          dryRun: true,
+          inferredProject: confirm,
+        });
+
+        assertEquals(outcome.kind, "planned-create");
+        assertEquals(calls.reserveSlug, []);
+        assertEquals(await linkExists(dir), false);
+      });
+    });
+
+    it("does not ask when the lookup fails for a reason other than not found", async () => {
+      await withTempDir(async (dir) => {
+        const { client } = fakeClient({ getProjectError: serverError });
+        const { choices, confirm } = recordingConfirm(true);
+        await assertRejects(() =>
+          resolveOrCreateProject({
+            projectDir: dir,
+            config: config(),
+            source: INFERRED,
+            client,
+            inferredProject: confirm,
+          })
+        );
+        assertEquals(choices, []);
       });
     });
   });

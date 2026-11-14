@@ -794,7 +794,7 @@ describe("DeployProject", () => {
         // rest of this test passes against a fully classified error.
         assertStringIncludes(
           (error as Error).message,
-          "Check the project reference or remove it to let deploy create a project",
+          "Check the project reference, or remove it and run veryfront up to create a project",
         );
         assertEquals(
           (error as Error).message.includes(".veryfront/project.json"),

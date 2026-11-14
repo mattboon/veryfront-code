@@ -46,6 +46,7 @@ import {
 } from "../../shared/deployment-provenance.ts";
 import { setJsonMode } from "../../shared/json-output.ts";
 import { readProjectLink, writeProjectLink } from "../../shared/project-link.ts";
+import type { InferredProjectChoice } from "../../shared/project-resolution.ts";
 import { stripAnsi } from "../../ui/ansi.ts";
 import { computeContentDigest, readSyncTarget, writeSyncTarget } from "../../sync/state.ts";
 
@@ -1263,7 +1264,7 @@ describe("push receipt source snapshot", () => {
     });
   });
 
-  it("persists a renamed inferred project link for later push and deploy commands", async () => {
+  it("persists a renamed inferred project link that the caller creates, for later push and deploy commands", async () => {
     const originalFetch = globalThis.fetch;
     const envKeys = [
       "VERYFRONT_API_TOKEN",
@@ -1348,7 +1349,7 @@ describe("push receipt source snapshot", () => {
           throw new Error(`Unexpected request: ${request.method} ${url.pathname}`);
         }) as typeof fetch;
 
-        await pushCommand({ projectDir, quiet: true });
+        await pushCommand({ projectDir, quiet: true, inferredProject: "create" });
 
         const link = await readProjectLink(projectDir);
         assertEquals(link?.projectId, "project-123");
@@ -1378,7 +1379,7 @@ describe("push receipt source snapshot", () => {
     });
   });
 
-  it("creates a new project instead of linking an inferred existing-project slug", async () => {
+  it("creates a new project for an inferred existing-project slug when the caller creates it", async () => {
     const originalFetch = globalThis.fetch;
     const envKeys = [
       "VERYFRONT_API_TOKEN",
@@ -1438,7 +1439,7 @@ describe("push receipt source snapshot", () => {
         }) as typeof fetch;
 
         await assertRejects(
-          () => pushCommand({ projectDir, quiet: true }),
+          () => pushCommand({ projectDir, quiet: true, inferredProject: "create" }),
           Error,
           "failed",
         );
@@ -1519,7 +1520,7 @@ describe("push receipt source snapshot", () => {
     });
   });
 
-  it("persists an accepted inferred slug before uploading project files", async () => {
+  it("persists an inferred slug the caller creates before uploading project files", async () => {
     const originalFetch = globalThis.fetch;
     const envKeys = [
       "VERYFRONT_API_TOKEN",
@@ -1577,7 +1578,7 @@ describe("push receipt source snapshot", () => {
         }) as typeof fetch;
 
         await assertRejects(
-          () => pushCommand({ projectDir, quiet: true }),
+          () => pushCommand({ projectDir, quiet: true, inferredProject: "create" }),
           Error,
           "failed",
         );
@@ -1915,6 +1916,143 @@ describe("push receipt source snapshot", () => {
       envKeys.forEach((key, index) => restoreEnv(key, savedEnv[index]));
       _resetEnvironmentConfig();
     }
+  });
+});
+
+describe("push in a folder with no linked project", () => {
+  const ENV_KEYS = [
+    "VERYFRONT_API_TOKEN",
+    "VERYFRONT_API_URL",
+    "VERYFRONT_API_BASE_URL",
+    "VERYFRONT_PROJECT_SLUG",
+    "TENANT_PROJECT_SLUG",
+    "VERYFRONT_PROJECT_ID",
+    "TENANT_PROJECT_ID",
+  ];
+  const UNLINKED_MESSAGE =
+    "No Veryfront project is linked to this folder. Run veryfront up to create one, or pass --project <slug> to push to an existing project.";
+
+  async function withUnlinkedProject(
+    test: (projectDir: string, requests: string[]) => Promise<void>,
+    respond: (request: Request, url: URL) => Promise<Response | null> | Response | null = () =>
+      null,
+  ): Promise<void> {
+    const savedEnv = ENV_KEYS.map((key) => Deno.env.get(key));
+    await withGitProject(async ({ projectDir }) => {
+      const requests: string[] = [];
+      try {
+        Deno.env.set("VERYFRONT_API_TOKEN", "<TOKEN>");
+        Deno.env.set("VERYFRONT_API_URL", "https://control.example.test");
+        for (const key of ENV_KEYS.slice(2)) Deno.env.delete(key);
+        await Deno.writeTextFile(
+          `${projectDir}/package.json`,
+          `${JSON.stringify({ name: "my-project" }, null, 2)}\n`,
+        );
+        _resetEnvironmentConfig();
+        await withMockFetch(async (input: string | URL | Request, init?: RequestInit) => {
+          const request = input instanceof Request ? input : new Request(input, init);
+          const url = new URL(request.url);
+          requests.push(`${request.method} ${url.pathname}`);
+          const response = await respond(request, url);
+          if (response) return response;
+          throw new Error(`Unexpected request: ${request.method} ${url.pathname}`);
+        }, () => test(projectDir, requests));
+      } finally {
+        ENV_KEYS.forEach((key, index) => restoreEnv(key, savedEnv[index]));
+        _resetEnvironmentConfig();
+      }
+    });
+  }
+
+  it("stops before any request when nobody can be asked", async () => {
+    await withUnlinkedProject(async (projectDir, requests) => {
+      for (const dryRun of [false, true]) {
+        const error = await assertRejects(
+          () => pushCommand({ projectDir, quiet: true, dryRun }),
+          VeryfrontError,
+        );
+        assertInstanceOf(error, VeryfrontError);
+        assertEquals(error.slug, "invalid-argument");
+        assertEquals(error.exitCode, 2);
+        assertEquals(error.message, UNLINKED_MESSAGE);
+      }
+      assertEquals(requests, []);
+      assertEquals(await readProjectLink(projectDir), null);
+    });
+  });
+
+  it("names the existing project it would use, and links it without creating one", async () => {
+    const choices: InferredProjectChoice[] = [];
+    const uploaded = new Map<string, string>();
+    await withUnlinkedProject(
+      async (projectDir, requests) => {
+        await pushCommand({
+          projectDir,
+          quiet: true,
+          inferredProject: (choice) => {
+            choices.push(choice);
+            return Promise.resolve(true);
+          },
+        });
+
+        assertEquals(choices, [{
+          slug: "my-project",
+          existing: { id: "project-123", slug: "my-project" },
+        }]);
+        assertEquals(requests.includes("POST /projects"), false);
+        const link = await readProjectLink(projectDir);
+        assertEquals(link?.projectId, "project-123");
+        assertEquals(link?.projectSlug, "my-project");
+      },
+      async (request, url) => {
+        if (request.method === "GET" && url.pathname === "/projects/my-project") {
+          return Response.json({ id: "project-123", slug: "my-project" });
+        }
+        if (request.method === "GET" && url.pathname === "/projects/project-123/files") {
+          return Response.json({
+            data: [...uploaded].map(([path, content], index) => ({
+              path,
+              content,
+              version_id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+            })),
+            page_info: {},
+          });
+        }
+        if (request.method === "PUT" && url.pathname.startsWith("/projects/project-123/files/")) {
+          const body = await request.json() as { content: string };
+          uploaded.set(decodeURIComponent(url.pathname.split("/").at(-1) ?? ""), body.content);
+          return Response.json({});
+        }
+        if (request.method === "GET" && url.pathname === "/projects/project-123") {
+          return Response.json({ id: "project-123", slug: "my-project" });
+        }
+        return null;
+      },
+    );
+  });
+
+  it("stops without creating a project when the answer is no", async () => {
+    await withUnlinkedProject(
+      async (projectDir, requests) => {
+        const error = await assertRejects(
+          () =>
+            pushCommand({
+              projectDir,
+              quiet: true,
+              inferredProject: () => Promise.resolve(false),
+            }),
+          VeryfrontError,
+        );
+        assertInstanceOf(error, VeryfrontError);
+        assertEquals(error.message, UNLINKED_MESSAGE);
+        assertEquals(requests, ["GET /projects/my-project"]);
+        assertEquals(await readProjectLink(projectDir), null);
+      },
+      (request, url) =>
+        request.method === "GET" && url.pathname === "/projects/my-project"
+          ? Response.json({ error: "not found" }, { status: 404 })
+          : null,
+    );
   });
 });
 
