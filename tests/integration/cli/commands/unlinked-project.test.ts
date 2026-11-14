@@ -36,6 +36,7 @@ type Command = (args: ParsedArgs) => Promise<void>;
 /** Runs `fn` in an empty folder named `code`, with a token and no project reference. */
 async function withUnlinkedFolder(
   fn: (projectDir: string, requests: string[]) => Promise<void>,
+  options: { token?: boolean } = {},
 ): Promise<void> {
   const root = await makeTempDir({ prefix: "vf-unlinked-project-" });
   const projectDir = join(root, "code");
@@ -47,7 +48,7 @@ async function withUnlinkedFolder(
   const requests: string[] = [];
   try {
     for (const name of PROJECT_ENVIRONMENT_NAMES) Deno.env.delete(name);
-    Deno.env.set("VERYFRONT_API_TOKEN", "test-token");
+    if (options.token !== false) Deno.env.set("VERYFRONT_API_TOKEN", "test-token");
     Deno.env.set("XDG_CONFIG_HOME", root);
     _resetEnvironmentConfig();
     await withMockFetch((input) => {
@@ -113,6 +114,21 @@ describe("commands in a folder with no linked project", () => {
       }
       assertEquals(requests, []);
     });
+  });
+
+  it("stop before asking for a login when no credential is set", async () => {
+    await withUnlinkedFolder(async (projectDir, requests) => {
+      for (const [name, command, args] of unlinkedCases(projectDir)) {
+        const error = await assertRejects(
+          () => command({ ...args, "project-dir": projectDir }),
+          VeryfrontError,
+          undefined,
+          name,
+        ) as VeryfrontError;
+        assertEquals(error.message, NO_LINKED_PROJECT_MESSAGE, name);
+      }
+      assertEquals(requests, []);
+    }, { token: false });
   });
 
   it("use the project linked to the folder", async () => {

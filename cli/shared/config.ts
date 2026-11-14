@@ -696,48 +696,19 @@ export async function resolveApiCredentialForFallback(
   return { apiUrl: trust.apiUrl, apiToken: candidate?.apiToken ?? null };
 }
 
-async function resolveConfigBase(
-  projectDir: string | undefined,
+interface ProjectReferenceResolution {
+  projectSlug: string;
+  projectId?: string;
+  projectReferenceSource: ProjectReferenceSource;
+}
+
+/** Which project the directory names, and where that name came from. Needs no credential. */
+async function resolveProjectReference(
+  dir: string,
   env: EnvironmentConfig,
-  interactive: boolean,
-  allowModuleConfigExecution: boolean,
-  allowAuthPrompt: boolean,
-  authOptions: { transport?: typeof fetch } = {},
-): Promise<ResolvedConfigDetails> {
-  const dir = projectDir ?? cwd();
-  const configFileResolution = await readConfigFileResolution(dir, allowModuleConfigExecution);
-  const configFile = configFileResolution.config;
-
-  const trust = resolveApiUrlTrust(env, configFile, join(dir, "veryfront.json"));
-  const apiUrl = trust.apiUrl;
-
-  let { apiToken, apiTokenSource } = await resolveApiTokenForMode(
-    env,
-    configFile,
-    interactive,
-    trust,
-  );
-
-  if (!apiToken && trust.repositorySteered) {
-    throw new UntrustedApiUrlCredentialError(
-      describeUntrustedApiUrl(trust),
-    );
-  }
-
-  if (!apiToken && interactive && allowAuthPrompt) {
-    const userInfo = await ensureAuthenticated(env, dir, authOptions);
-    if (!userInfo) throw new Error("Authentication required for this operation.");
-    apiToken = (await readToken(env)) ?? null;
-    apiTokenSource = apiToken ? "token-store" : undefined;
-    if (!apiToken) throw new Error("Authentication failed. Please try again.");
-  }
-
-  if (!apiToken) {
-    throw new Error(
-      "Missing API token. Run 'veryfront login' or set VERYFRONT_API_TOKEN environment variable",
-    );
-  }
-
+  configFileResolution: Awaited<ReturnType<typeof readConfigFileResolution>>,
+  apiUrl: string,
+): Promise<ProjectReferenceResolution> {
   let projectSlug: string | null | undefined;
   let projectId: string | undefined;
   let projectReferenceSource: ProjectReferenceSource;
@@ -794,6 +765,64 @@ async function resolveConfigBase(
       "Could not determine project reference. Set VERYFRONT_PROJECT_SLUG, TENANT_PROJECT_SLUG, VERYFRONT_PROJECT_ID, or add projectSlug to veryfront.config.ts",
     );
   }
+
+  return { projectSlug, ...(projectId ? { projectId } : {}), projectReferenceSource };
+}
+
+async function resolveConfigBase(
+  projectDir: string | undefined,
+  env: EnvironmentConfig,
+  interactive: boolean,
+  allowModuleConfigExecution: boolean,
+  allowAuthPrompt: boolean,
+  authOptions: { transport?: typeof fetch } = {},
+  options: { refuseInferredReference?: boolean } = {},
+): Promise<ResolvedConfigDetails> {
+  const dir = projectDir ?? cwd();
+  const configFileResolution = await readConfigFileResolution(dir, allowModuleConfigExecution);
+  const configFile = configFileResolution.config;
+
+  const trust = resolveApiUrlTrust(env, configFile, join(dir, "veryfront.json"));
+  const apiUrl = trust.apiUrl;
+
+  // A command that refuses a guessed project says so before it asks anyone
+  // to log in: the reference needs no credential.
+  const earlyReference = options.refuseInferredReference
+    ? await resolveProjectReference(dir, env, configFileResolution, apiUrl)
+    : undefined;
+  if (earlyReference?.projectReferenceSource.kind === "inferred") {
+    throw INVALID_ARGUMENT.create({ detail: NO_LINKED_PROJECT_MESSAGE });
+  }
+
+  let { apiToken, apiTokenSource } = await resolveApiTokenForMode(
+    env,
+    configFile,
+    interactive,
+    trust,
+  );
+
+  if (!apiToken && trust.repositorySteered) {
+    throw new UntrustedApiUrlCredentialError(
+      describeUntrustedApiUrl(trust),
+    );
+  }
+
+  if (!apiToken && interactive && allowAuthPrompt) {
+    const userInfo = await ensureAuthenticated(env, dir, authOptions);
+    if (!userInfo) throw new Error("Authentication required for this operation.");
+    apiToken = (await readToken(env)) ?? null;
+    apiTokenSource = apiToken ? "token-store" : undefined;
+    if (!apiToken) throw new Error("Authentication failed. Please try again.");
+  }
+
+  if (!apiToken) {
+    throw new Error(
+      "Missing API token. Run 'veryfront login' or set VERYFRONT_API_TOKEN environment variable",
+    );
+  }
+
+  const { projectSlug, projectId, projectReferenceSource } = earlyReference ??
+    await resolveProjectReference(dir, env, configFileResolution, apiUrl);
 
   return {
     config: {
@@ -875,11 +904,16 @@ export async function resolveLinkedProjectConfigWithAuth(
   projectDir?: string,
   projectSlug?: string,
 ): Promise<ResolvedConfig> {
-  const { config, projectReferenceSource } = await resolveConfigWithAuthDetails(projectDir);
-  if (projectSlug) return { ...config, projectSlug };
-  if (projectReferenceSource.kind === "inferred") {
-    throw INVALID_ARGUMENT.create({ detail: NO_LINKED_PROJECT_MESSAGE });
-  }
+  if (projectSlug) return { ...await resolveConfigWithAuth(projectDir), projectSlug };
+  const { config } = await resolveConfigBase(
+    projectDir,
+    getEnvironmentConfig(),
+    true,
+    true,
+    true,
+    {},
+    { refuseInferredReference: true },
+  );
   return config;
 }
 
