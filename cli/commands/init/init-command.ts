@@ -23,12 +23,6 @@ import { isTTY } from "#cli/utils";
 import { isInteractive } from "../../shared/interactive.ts";
 import { chooseCloudProject, type CloudProjectChoice } from "../../shared/cloud-project.ts";
 import { inferenceSetupOptionLines } from "../../shared/inference-setup.ts";
-import {
-  defaultModelMismatchKeys,
-  hasUsableInference,
-  listInferenceOptions,
-  readProviderKeys,
-} from "../dev/inference-status.ts";
 import { processEnvValue } from "../dev/display-options.ts";
 import { DEFAULT_TEMPLATE } from "./catalog.ts";
 
@@ -177,26 +171,34 @@ function validateInitProjectName(name: string): string | null {
 /**
  * The provider settings `veryfront dev` in the new folder will see, as far as
  * `init` knows them: the shell's own values, then the values `init` wrote to
- * the new `.env`. A value the invoking folder's `.env` loaded into this process
- * does not count, since `dev` in the new folder never loads that file. Other
- * env files are not read: a key `init` cannot see only leaves the advice in.
+ * the new `.env` (an integration such as the experimental `openai` one writes
+ * `OPENAI_API_KEY`). A value the invoking folder's `.env` loaded into this
+ * process does not count, since `dev` in the new folder never loads that file.
+ * A written value with a `$` reference is not counted: `dev` expands it against
+ * an environment `init` cannot see. A key `init` cannot see only leaves the
+ * advice in.
  */
 export function newProjectEnv(
   writtenValues: Readonly<Record<string, string>>,
   hostValue: (name: string) => string | undefined = processEnvValue,
 ): (name: string) => string | undefined {
-  return (name) => hostValue(name) ?? (writtenValues[name]?.trim() || undefined);
+  return (name) => {
+    const host = hostValue(name);
+    if (host !== undefined) return host;
+    const written = writtenValues[name]?.trim();
+    return written && !written.includes("$") ? written : undefined;
+  };
 }
 
 /**
- * Whether the new project can already reach a model without Cloud: the check
- * the `dev` banner makes. The scaffolded agents set no model, so a key counts
- * only when the default model can use it.
+ * Whether the new project can already reach a model without Cloud. The
+ * scaffolded agents set no model, so they run the default OpenAI model, and
+ * only an OpenAI key serves it: another provider's key alone fails with
+ * `default-model-credential-mismatch`, which is what the advice's model line
+ * is for.
  */
 function newProjectHasInference(env: (name: string) => string | undefined): boolean {
-  const environment = { ...readProviderKeys(env), agentModels: [undefined] };
-  return hasUsableInference(listInferenceOptions(environment)) &&
-    defaultModelMismatchKeys(environment).length === 0;
+  return Boolean(env("OPENAI_API_KEY")?.trim());
 }
 
 /**

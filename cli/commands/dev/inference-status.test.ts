@@ -125,18 +125,23 @@ describe("commands/dev/inference-status", () => {
     const anthropicOnly = { anthropicApiKey: "<API_KEY>", agentModels: [undefined, undefined] };
 
     it("names a key the default model cannot use", () => {
-      assertEquals(defaultModelMismatchKeys(anthropicOnly), ["ANTHROPIC_API_KEY"]);
+      assertEquals(defaultModelMismatchKeys(anthropicOnly, false), ["ANTHROPIC_API_KEY"]);
       assertEquals(
         defaultModelMismatchKeys({
           googleApiKey: "<API_KEY>",
           mistralApiKey: "<API_KEY>",
           agentModels: [undefined],
-        }),
+        }, false),
         ["GOOGLE_API_KEY", "MISTRAL_API_KEY"],
       );
       assertEquals(
-        defaultModelKeyMismatchLine(["ANTHROPIC_API_KEY"]),
+        defaultModelKeyMismatchLine(["ANTHROPIC_API_KEY"], { autoRunsDirect: true }),
         'Agents that set no model use "openai/gpt-5-nano", which needs OPENAI_API_KEY. To use ANTHROPIC_API_KEY, set the agent\'s model to "auto" or "<provider>/<model>".',
+      );
+      // With Veryfront Cloud selected, "auto" prefers the gateway.
+      assertEquals(
+        defaultModelKeyMismatchLine(["ANTHROPIC_API_KEY"], { autoRunsDirect: false }),
+        'Agents that set no model use "openai/gpt-5-nano", which needs OPENAI_API_KEY. To use ANTHROPIC_API_KEY, set the agent\'s model to "<provider>/<model>".',
       );
     });
 
@@ -149,7 +154,10 @@ describe("commands/dev/inference-status", () => {
     it("names nothing when every agent sets a model or auto", () => {
       for (const model of ["anthropic/claude-sonnet-4-6", "auto", ""]) {
         assertEquals(
-          defaultModelMismatchKeys({ anthropicApiKey: "<API_KEY>", agentModels: [model, model] }),
+          defaultModelMismatchKeys(
+            { anthropicApiKey: "<API_KEY>", agentModels: [model, model] },
+            false,
+          ),
           [],
         );
       }
@@ -161,26 +169,23 @@ describe("commands/dev/inference-status", () => {
         defaultModelMismatchKeys({
           anthropicApiKey: "<API_KEY>",
           agentModels: ["anthropic/claude-sonnet-4-6", undefined],
-        }),
+        }, false),
         ["ANTHROPIC_API_KEY"],
       );
     });
 
-    it("names nothing when the default model can run", () => {
-      for (
-        const environment of [
-          { ...anthropicOnly, openaiApiKey: "<API_KEY>" },
-          { ...anthropicOnly, apiToken: "<TOKEN>", projectSlug: "support-agent" },
-          { ...anthropicOnly, defaultModelProviderRegistered: true },
-        ]
-      ) {
-        assertEquals(defaultModelMismatchKeys(environment), []);
-      }
+    it("names nothing when the runtime can run the default model", () => {
+      // The caller asks the runtime, so Cloud routing, an OpenAI key and an
+      // application openai provider all count as the runtime counts them.
+      assertEquals(defaultModelMismatchKeys(anthropicOnly, true), []);
     });
 
     it("names nothing when the agents are not known", () => {
       for (const agentModels of [undefined, []]) {
-        assertEquals(defaultModelMismatchKeys({ anthropicApiKey: "<API_KEY>", agentModels }), []);
+        assertEquals(
+          defaultModelMismatchKeys({ anthropicApiKey: "<API_KEY>", agentModels }, false),
+          [],
+        );
       }
     });
 
@@ -189,7 +194,7 @@ describe("commands/dev/inference-status", () => {
       const generative = readProviderKeys(read({ GOOGLE_GENERATIVE_AI_API_KEY: "<API_KEY>" }));
       assertEquals(generative.googleApiKeyName, "GOOGLE_GENERATIVE_AI_API_KEY");
       assertEquals(
-        defaultModelMismatchKeys({ ...generative, agentModels: [undefined] }),
+        defaultModelMismatchKeys({ ...generative, agentModels: [undefined] }, false),
         ["GOOGLE_GENERATIVE_AI_API_KEY"],
       );
       // The runtime reads GOOGLE_API_KEY first, and skips an empty one.

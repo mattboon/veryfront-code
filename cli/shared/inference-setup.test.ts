@@ -65,7 +65,7 @@ describe("shared/inference-setup", () => {
   it("follows the public copy rules", () => {
     assert(!/[–—]/.test(text), "copy must not use en or em dashes");
     assert(
-      !/[–—]/.test(defaultModelKeyMismatchLine(["ANTHROPIC_API_KEY"])),
+      !/[–—]/.test(defaultModelKeyMismatchLine(["ANTHROPIC_API_KEY"], { autoRunsDirect: true })),
       "copy must not use en or em dashes",
     );
   });

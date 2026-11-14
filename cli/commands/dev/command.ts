@@ -3,7 +3,7 @@
  */
 
 import { compileAllMDX, watchMDX } from "veryfront/build";
-import { CONFIG_NOT_FOUND, PORT_IN_USE } from "veryfront/errors";
+import { CONFIG_NOT_FOUND, PORT_IN_USE, VeryfrontError } from "veryfront/errors";
 import { join } from "veryfront/platform/path";
 import { runtime } from "#cli/runtime-adapter";
 import { privateTextTrim } from "#veryfront/security/private-text.ts";
@@ -16,7 +16,7 @@ import { isPersistentLocalCacheEnabled } from "veryfront/cache";
 import { validateProviderConfig } from "veryfront/discovery";
 import { agentRegistry } from "#veryfront/agent/composition/index.ts";
 import { getAgentExecutionConfig } from "#veryfront/agent/runtime/execution-config.ts";
-import { hasApplicationModelProvider } from "#veryfront/provider/model-registry.ts";
+import { resolveRuntimeModel } from "#veryfront/agent/runtime/model-resolution.ts";
 import { brand, dim, error as errorColor, warning } from "#cli/ui";
 import { exitProcess, isTTY, isVerbose, registerTerminationSignals } from "#cli/utils";
 import { DEV_SHORTCUTS, shortcutsBlock } from "../../ui/components/shortcuts.ts";
@@ -291,6 +291,30 @@ export async function clearLocalCachesIfPortFree(
   if (persists()) return false;
   await clear();
   return true;
+}
+
+/**
+ * Whether the runtime can resolve an agent with no model in this process. Only
+ * `default-model-credential-mismatch` counts as no: the runtime raises it when
+ * the default model's provider has no credential and another provider has one,
+ * after Cloud routing and application providers are applied.
+ */
+function defaultModelRunsHere(): boolean {
+  try {
+    resolveRuntimeModel(undefined);
+    return true;
+  } catch (error) {
+    return !(error instanceof VeryfrontError && error.slug === "default-model-credential-mismatch");
+  }
+}
+
+/** Whether `model: "auto"` resolves to direct inference here, not the gateway. */
+function autoRunsDirectHere(): boolean {
+  try {
+    return !resolveRuntimeModel("auto").startsWith("veryfront-cloud/");
+  } catch {
+    return false;
+  }
 }
 
 export function devCommand(options: DevOptions): Promise<DevCommandResult> {
@@ -618,7 +642,6 @@ export function devCommand(options: DevOptions): Promise<DevCommandResult> {
         agentModels: [...agentRegistry.getAll().values()].map((agent) =>
           getAgentExecutionConfig(agent.config).model
         ),
-        defaultModelProviderRegistered: hasApplicationModelProvider("openai"),
       };
       const inferenceOptions = listInferenceOptions(inferenceEnvironment);
       if (inferenceOptions.length > 0) {
@@ -642,9 +665,16 @@ export function devCommand(options: DevOptions): Promise<DevCommandResult> {
           );
         }
       }
-      const mismatchKeys = defaultModelMismatchKeys(inferenceEnvironment);
+      const mismatchKeys = defaultModelMismatchKeys(
+        inferenceEnvironment,
+        defaultModelRunsHere(),
+      );
       if (mismatchKeys.length > 0) {
-        console.log(`  ${warning("!")} ${defaultModelKeyMismatchLine(mismatchKeys)}`);
+        console.log(
+          `  ${warning("!")} ${
+            defaultModelKeyMismatchLine(mismatchKeys, { autoRunsDirect: autoRunsDirectHere() })
+          }`,
+        );
       }
       const [hintHeading, ...hintLines] = devInferenceHintLines(inferenceOptions);
       if (hintHeading) console.log(`  ${warning("!")} ${hintHeading}`);

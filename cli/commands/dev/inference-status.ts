@@ -19,8 +19,6 @@ export interface InferenceEnvironment {
    * Omit it when the agents are not known.
    */
   agentModels?: readonly (string | undefined)[];
-  /** The application registered its own `openai` model provider. */
-  defaultModelProviderRegistered?: boolean;
 }
 
 /**
@@ -83,21 +81,22 @@ export function hasUsableInference(options: readonly string[]): boolean {
 
 /**
  * Provider keys the default model cannot use. An agent with no model runs the
- * default OpenAI model, and the runtime refuses to swap in another provider's
- * key (`default-model-credential-mismatch`). So when an agent leaves its model
- * unset, and neither the gateway, an OpenAI key, nor an application `openai`
- * provider can serve the default, an Anthropic, Google, or Mistral key serves
- * none of that agent's default requests. The keys still serve a
- * request that picks a model of their provider, so callers warn rather than
- * drop them.
+ * default model, and the runtime refuses to swap in another provider's key
+ * (`default-model-credential-mismatch`). `defaultModelRuns` is the runtime's
+ * own answer for an agent with no model, so Cloud routing and application
+ * providers count as the runtime counts them. When it is false and an agent
+ * leaves its model unset, an Anthropic, Google, or Mistral key serves none of
+ * that agent's default requests. The keys still serve a request that picks a
+ * model of their provider, so callers warn rather than drop them.
  */
-export function defaultModelMismatchKeys(environment: InferenceEnvironment): string[] {
-  const { agentModels } = environment;
+export function defaultModelMismatchKeys(
+  environment: InferenceEnvironment,
+  defaultModelRuns: boolean,
+): string[] {
   // One agent with no model is enough: a sibling's model does not run it.
-  const someAgentUsesDefault = agentModels?.some((model) => model === undefined) === true;
-  const defaultModelServed = (isSet(environment.apiToken) && isSet(environment.projectSlug)) ||
-    isSet(environment.openaiApiKey) || environment.defaultModelProviderRegistered === true;
-  if (!someAgentUsesDefault || defaultModelServed) return [];
+  const someAgentUsesDefault = environment.agentModels?.some((model) => model === undefined) ===
+    true;
+  if (!someAgentUsesDefault || defaultModelRuns) return [];
 
   const keys: string[] = [];
   if (isSet(environment.anthropicApiKey)) keys.push("ANTHROPIC_API_KEY");

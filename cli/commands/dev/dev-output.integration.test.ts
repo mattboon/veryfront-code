@@ -672,7 +672,10 @@ export default agent({ id: "assistant", system: "Answer briefly." });
           assertStringIncludes(output, "App ready");
           // A request can still pick an Anthropic model, so the key stays listed.
           assertStringIncludes(output, "Anthropic direct");
-          assertStringIncludes(output, defaultModelKeyMismatchLine(["ANTHROPIC_API_KEY"]));
+          assertStringIncludes(
+            output,
+            defaultModelKeyMismatchLine(["ANTHROPIC_API_KEY"], { autoRunsDirect: true }),
+          );
         });
       },
     );

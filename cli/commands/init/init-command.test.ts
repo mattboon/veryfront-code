@@ -372,6 +372,7 @@ describe("offerCloudProjectAfterInit", () => {
   });
 
   it("counts a key init wrote to the new .env", async () => {
+    // For example the experimental openai integration writes OPENAI_API_KEY.
     const env = newProjectEnv({ OPENAI_API_KEY: "<API_KEY>" }, () => undefined);
     const logged: string[] = [];
     await offerCloudProjectAfterInit(
@@ -383,14 +384,22 @@ describe("offerCloudProjectAfterInit", () => {
     assertEquals(logged, []);
   });
 
-  it("ranks the shell's value above the written one, and skips a blank written value", () => {
+  it("ranks the shell's value first and skips written values dev would expand", () => {
     const shell = { OPENAI_API_KEY: "<SHELL_KEY>" } as Record<string, string>;
     const env = newProjectEnv(
-      { OPENAI_API_KEY: "<WRITTEN_KEY>", ANTHROPIC_API_KEY: " " },
+      {
+        OPENAI_API_KEY: "<WRITTEN_KEY>",
+        ANTHROPIC_API_KEY: " ",
+        MISTRAL_API_KEY: "$PARENT_KEY",
+        GOOGLE_API_KEY: "${PARENT_KEY}",
+      },
       (name) => shell[name],
     );
     assertEquals(env("OPENAI_API_KEY"), "<SHELL_KEY>");
     assertEquals(env("ANTHROPIC_API_KEY"), undefined);
+    // dev expands a reference against an environment init cannot see.
+    assertEquals(env("MISTRAL_API_KEY"), undefined);
+    assertEquals(env("GOOGLE_API_KEY"), undefined);
   });
 
   it("still names both ways when only a key the scaffolded agents cannot use is set", async () => {
