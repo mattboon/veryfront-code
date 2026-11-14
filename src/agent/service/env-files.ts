@@ -1,6 +1,6 @@
-import { cwd as getCwd, env as getProcessEnv, setEnv } from "#veryfront/platform/compat/process.ts";
+import { cwd as getCwd } from "#veryfront/platform/compat/process.ts";
 import { loadWithProvenance } from "#veryfront/platform/compat/std/dotenv.ts";
-import { applyVeryfrontApiKeyAlias, markEnvFileSource } from "#veryfront/utils/env-loader.ts";
+import { applyVeryfrontApiKeyAlias, startEnvFileLoad } from "#veryfront/utils/env-loader.ts";
 
 const DEFAULT_AGENT_SERVICE_ENV_FILES = [".env", ".env.local"] as const;
 
@@ -32,17 +32,18 @@ function joinEnvPath(cwd: string, file: string): string {
 /**
  * Loads agent service env files.
  *
- * Each value carries the env loader's file provenance, expansion taint
- * included, and `VERYFRONT_API_KEY` then fills the token slot by the env
- * loader's rule, so a credential from these files is judged the same whichever
- * name holds it.
+ * Entries go through the env loader's writer: a value defined before the load
+ * wins (an empty one too), in any letter case on Windows, and each written
+ * value carries its file provenance and expansion taint. `VERYFRONT_API_KEY`
+ * then fills the token slot by the env loader's rule, so a credential from
+ * these files is judged the same whichever name holds it.
  */
 export async function loadAgentServiceEnvFiles(
   options: AgentServiceEnvFileLoadOptions = {},
 ): Promise<AgentServiceEnvFileLoadResult> {
   const cwd = options.cwd ?? getCwd();
   const files = options.files ?? DEFAULT_AGENT_SERVICE_ENV_FILES;
-  const protectedKeys = new Set(Object.keys(getProcessEnv()));
+  const writeEntry = startEnvFileLoad({ override: false, keepDefined: true });
   const loadedFiles: string[] = [];
   let loadedVariables = 0;
 
@@ -58,13 +59,7 @@ export async function loadAgentServiceEnvFiles(
     loadedFiles.push(envPath);
 
     for (const [key, value] of entries) {
-      if (protectedKeys.has(key)) {
-        continue;
-      }
-
-      setEnv(key, value);
-      markEnvFileSource(key, envPath, expandedFromProcessEnv.has(key));
-      loadedVariables++;
+      if (writeEntry(key, value, envPath, expandedFromProcessEnv.has(key))) loadedVariables++;
     }
   }
 

@@ -123,7 +123,7 @@ function readExistingValueForLoad(key: string): string | undefined {
 function keepsExistingValue(
   existing: string | undefined,
   setByThisLoad: boolean,
-  options: EnvDirLoadOptions,
+  options: Pick<EnvDirLoadOptions, "override" | "keepDefined">,
 ): boolean {
   if (options.override) return false;
   // An earlier file of this same load set it: later files rank higher.
@@ -131,6 +131,57 @@ function keepsExistingValue(
   // An empty value set before this load counts as set for an additional load.
   if (options.keepDefined) return existing !== undefined;
   return Boolean(existing);
+}
+
+/** The case-folding an env load keys its state by: the name's lower case where the environment ignores case (Windows). */
+function createEnvKeyFolder(): (key: string) => string {
+  const caseInsensitive = envLoaderOsType() === "windows";
+  return (key: string): string =>
+    caseInsensitive ? applyIntrinsic(stringToLowerCase, key, []) as string : key;
+}
+
+/** Writes one env-file entry, returning whether it replaced the environment's value. */
+export type EnvFileEntryWriter = (
+  key: string,
+  value: string,
+  file: string,
+  expandedFromProcessEnv: boolean,
+) => boolean;
+
+/**
+ * Start one env-file load and return its entry writer.
+ *
+ * The writer applies the env loader's precedence rule: a value defined before
+ * the load wins (an empty one too when `keepDefined`), a later file of the
+ * same load replaces an earlier one, and on Windows every spelling of a name
+ * is the same variable, so `veryfront_api_key` in a file never replaces an
+ * exported `VERYFRONT_API_KEY`. A written value carries the file's provenance.
+ * Every env-file loader writes through this, then calls
+ * {@link applyVeryfrontApiKeyAlias}.
+ */
+export function startEnvFileLoad(
+  options: { override: boolean; keepDefined: boolean },
+): EnvFileEntryWriter {
+  const foldKey = createEnvKeyFolder();
+  const keysSetByThisLoad = new Set<string>();
+  return (key, value, file, expandedFromProcessEnv) => {
+    const foldedKey = foldKey(key);
+    const setByThisLoad = keysSetByThisLoad.has(foldedKey);
+    if (keepsExistingValue(readExistingValueForLoad(key), setByThisLoad, options)) return false;
+
+    if (foldedKey === foldKey(VERYFRONT_API_TOKEN_ENV)) veryfrontApiTokenAliasValue = undefined;
+    setEnv(key, value);
+    keysSetByThisLoad.add(foldedKey);
+    markEnvFileValue(key);
+    // Drop provenance recorded under another spelling of this variable, so
+    // no stale record outlives the value that replaced it.
+    clearEnvSourceAliases(key);
+    applyIntrinsic(mapSet, envSources, [
+      key,
+      { file, source: "env-file", expandedFromProcessEnv },
+    ]);
+    return true;
+  };
 }
 
 async function readEnvDirFiles(cwd: string, options: EnvDirLoadOptions): Promise<void> {
@@ -141,12 +192,10 @@ async function readEnvDirFiles(cwd: string, options: EnvDirLoadOptions): Promise
   // the environment ignores case (Windows). A later file's `api_url` then
   // replaces an earlier file's `API_URL` in the precedence check, in the
   // values later `$NAME` references see, and in their expansion taint.
-  const caseInsensitive = envLoaderOsType() === "windows";
-  const foldKey = (key: string): string =>
-    caseInsensitive ? applyIntrinsic(stringToLowerCase, key, []) as string : key;
+  const foldKey = createEnvKeyFolder();
+  const writeEntry = startEnvFileLoad(options);
   const loadedVars: Record<string, string> = {};
   const taintedLoadedVars = new Set<string>();
-  const keysSetByThisLoad = new Set<string>();
 
   let loadedCount = 0;
   let totalVars = 0;
@@ -157,21 +206,9 @@ async function readEnvDirFiles(cwd: string, options: EnvDirLoadOptions): Promise
       const vars = parseEnvFile(content, loadedVars, taintedLoadedVars);
 
       for (const [key, { value, expandedFromProcessEnv }] of Object.entries(vars)) {
-        const foldedKey = foldKey(key);
-        const setByThisLoad = keysSetByThisLoad.has(foldedKey);
-        if (keepsExistingValue(readExistingValueForLoad(key), setByThisLoad, options)) continue;
+        if (!writeEntry(key, value, file, expandedFromProcessEnv)) continue;
 
-        if (foldedKey === foldKey(VERYFRONT_API_TOKEN_ENV)) veryfrontApiTokenAliasValue = undefined;
-        setEnv(key, value);
-        keysSetByThisLoad.add(foldedKey);
-        markEnvFileValue(key);
-        // Drop provenance recorded under another spelling of this variable, so
-        // no stale record outlives the value that replaced it.
-        clearEnvSourceAliases(key);
-        applyIntrinsic(mapSet, envSources, [
-          key,
-          { file, source: "env-file", expandedFromProcessEnv },
-        ]);
+        const foldedKey = foldKey(key);
         loadedVars[foldedKey] = value;
         if (expandedFromProcessEnv) taintedLoadedVars.add(foldedKey);
         else taintedLoadedVars.delete(foldedKey);
@@ -379,9 +416,9 @@ function isBlank(value: string | undefined): boolean {
  * judged by exactly the rules that file's `VERYFRONT_API_TOKEN` would be,
  * including the expansion taint of a value that names a shell variable.
  *
- * Every env-file loader calls this once its files are in, after recording each
- * value with {@link markEnvFileSource}, so the alias reads one provenance record
- * whichever loader ran.
+ * Every env-file loader calls this once its files are in, after writing each
+ * entry through {@link startEnvFileLoad}, so the alias reads one provenance
+ * record whichever loader ran.
  */
 export function applyVeryfrontApiKeyAlias(): void {
   settleVeryfrontApiKeyAlias();

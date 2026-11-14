@@ -15,7 +15,12 @@ import { assertEquals } from "#veryfront/testing/assert.ts";
 import { afterEach, describe, it } from "#veryfront/testing/bdd.ts";
 import { clearEnvFileValueSource } from "#veryfront/platform/compat/process/env.ts";
 import { deleteEnv, getEnv, setEnv, withTempDir } from "#veryfront/testing/deno-compat.ts";
-import { __resetEnvLoaderForTests, getEnvSource } from "#veryfront/utils/env-loader.ts";
+import {
+  __resetEnvLoaderForTests,
+  __setEnvLoaderExistingEnvReaderForTests,
+  __setEnvLoaderOsTypeForTests,
+  getEnvSource,
+} from "#veryfront/utils/env-loader.ts";
 import { withMockFetch } from "#veryfront/testing/mock-fetch.ts";
 import { loadAgentServiceEnvFiles } from "#veryfront/agent/service/env-files.ts";
 import {
@@ -29,6 +34,7 @@ const ENV_KEYS = [
   "VERYFRONT_API_TOKEN_FILE",
   "VERYFRONT_API_URL",
   "VERYFRONT_PROJECT_SLUG",
+  "veryfront_api_key",
 ] as const;
 
 const SELF_HOSTED_API = "https://self-hosted-api.example.test";
@@ -143,6 +149,41 @@ describe("agent service env files and token storage", () => {
     } finally {
       deleteEnv("VF_AGENT_ENV_FILE_SHELL_SECRET");
     }
+  });
+
+  it("keeps an exported VERYFRONT_API_KEY over a differently-cased file entry on Windows", async () => {
+    clearEnvKeys();
+    setEnv("VERYFRONT_API_KEY", "operator-key");
+    // Windows reads the environment case-insensitively.
+    __setEnvLoaderOsTypeForTests("windows");
+    __setEnvLoaderExistingEnvReaderForTests((name) => getEnv(name) ?? getEnv(name.toUpperCase()));
+    await withTempDir(async (dir) => {
+      await Deno.writeTextFile(
+        `${dir}/.env`,
+        "veryfront_api_key=repository-key\nVERYFRONT_PROJECT_SLUG=self-hosted-project\n",
+      );
+      const result = await loadAgentServiceEnvFiles({ cwd: dir, files: [".env"] });
+
+      // On Windows a write to `veryfront_api_key` replaces the operator's key.
+      assertEquals(getEnv("veryfront_api_key"), undefined);
+      assertEquals(result.loadedVariables, 1);
+      assertEquals(getEnv("VERYFRONT_API_TOKEN"), "operator-key");
+      assertEquals(getEnvSource("VERYFRONT_API_TOKEN"), { source: "process" });
+    });
+  });
+
+  it("lets a later service env file replace a differently-cased entry of an earlier one on Windows", async () => {
+    clearEnvKeys();
+    __setEnvLoaderOsTypeForTests("windows");
+    __setEnvLoaderExistingEnvReaderForTests((name) => getEnv(name) ?? getEnv(name.toUpperCase()));
+    await withTempDir(async (dir) => {
+      await Deno.writeTextFile(`${dir}/.env`, "VERYFRONT_API_KEY=key-from-env\n");
+      await Deno.writeTextFile(`${dir}/.env.local`, "veryfront_api_key=key-from-local\n");
+      const result = await loadAgentServiceEnvFiles({ cwd: dir });
+
+      assertEquals(result.loadedVariables, 2);
+      assertEquals(getEnv("veryfront_api_key"), "key-from-local");
+    });
   });
 
   it("lets a token in a later service env file win over a key in an earlier one", async () => {
