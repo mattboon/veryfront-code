@@ -1,6 +1,6 @@
 import { cwd as getCwd, env as getProcessEnv, setEnv } from "#veryfront/platform/compat/process.ts";
-import { load as loadDotenv } from "#veryfront/platform/compat/std/dotenv.ts";
-import { markEnvFileValue } from "#veryfront/platform/compat/process/env.ts";
+import { loadWithProvenance } from "#veryfront/platform/compat/std/dotenv.ts";
+import { applyVeryfrontApiKeyAlias, markEnvFileSource } from "#veryfront/utils/env-loader.ts";
 
 const DEFAULT_AGENT_SERVICE_ENV_FILES = [".env", ".env.local"] as const;
 
@@ -29,7 +29,14 @@ function joinEnvPath(cwd: string, file: string): string {
   return `${cwd.replace(/\/$/, "")}/${file}`;
 }
 
-/** Loads agent service env files. */
+/**
+ * Loads agent service env files.
+ *
+ * Each value carries the env loader's file provenance, expansion taint
+ * included, and `VERYFRONT_API_KEY` then fills the token slot by the env
+ * loader's rule, so a credential from these files is judged the same whichever
+ * name holds it.
+ */
 export async function loadAgentServiceEnvFiles(
   options: AgentServiceEnvFileLoadOptions = {},
 ): Promise<AgentServiceEnvFileLoadResult> {
@@ -41,8 +48,8 @@ export async function loadAgentServiceEnvFiles(
 
   for (const file of files) {
     const envPath = joinEnvPath(cwd, file);
-    const parsed = await loadDotenv({ envPath, allowEmptyValues: true });
-    const entries = Object.entries(parsed);
+    const { values, expandedFromProcessEnv } = await loadWithProvenance({ envPath });
+    const entries = Object.entries(values);
 
     if (entries.length === 0) {
       continue;
@@ -56,11 +63,12 @@ export async function loadAgentServiceEnvFiles(
       }
 
       setEnv(key, value);
-      markEnvFileValue(key);
+      markEnvFileSource(key, envPath, expandedFromProcessEnv.has(key));
       loadedVariables++;
     }
   }
 
+  applyVeryfrontApiKeyAlias();
   return { loadedFiles, loadedVariables };
 }
 

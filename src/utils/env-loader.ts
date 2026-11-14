@@ -378,8 +378,12 @@ function isBlank(value: string | undefined): boolean {
  * The copy keeps the key's provenance: a key from a project `.env` file is
  * judged by exactly the rules that file's `VERYFRONT_API_TOKEN` would be,
  * including the expansion taint of a value that names a shell variable.
+ *
+ * Every env-file loader calls this once its files are in, after recording each
+ * value with {@link markEnvFileSource}, so the alias reads one provenance record
+ * whichever loader ran.
  */
-function applyVeryfrontApiKeyAlias(): void {
+export function applyVeryfrontApiKeyAlias(): void {
   settleVeryfrontApiKeyAlias();
   // A token file supplies the credential ahead of the token variable. An alias
   // would attach the key's `.env` provenance to the token file's secret, so a
