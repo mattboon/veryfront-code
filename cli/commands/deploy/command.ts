@@ -307,16 +307,19 @@ async function deployCommandJson(options: DeployOptions): Promise<DeployResult |
     if (options.suppressJsonOutput) {
       throw vfErr;
     }
+    // A usage error (exit code 2, such as an unlinked folder) keeps its
+    // classification and exit code, as the human and router paths do.
+    const usageError = vfErr.exitCode === 2;
     if (!options.suppressJsonOutput) {
       streamJsonLine(
         createStreamErrorResult({
-          code: "RUNTIME_ERROR",
+          code: usageError ? "USAGE_ERROR" : "RUNTIME_ERROR",
           slug: vfErr.slug,
           message: vfErr.detail ?? vfErr.message,
         }),
       );
     }
-    exitProcess(1);
+    exitProcess(usageError ? 2 : 1);
     return null;
   }
 }

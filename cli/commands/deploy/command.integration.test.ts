@@ -1932,6 +1932,130 @@ it("does not claim dry-run deploy would push source when source push is skipped"
   }
 });
 
+it("plans the project an embedding command creates, such as init --deploy", async () => {
+  const projectDir = await Deno.makeTempDir();
+  const envKeys = [
+    "VERYFRONT_API_TOKEN",
+    "VERYFRONT_API_URL",
+    "VERYFRONT_PROJECT_SLUG",
+    "VERYFRONT_PROJECT_ID",
+  ];
+  const savedEnv = envKeys.map((key) => Deno.env.get(key));
+  const requests: string[] = [];
+  const logs: string[] = [];
+  const originalLog = console.log;
+
+  try {
+    await Deno.writeTextFile(`${projectDir}/package.json`, '{"name":"scaffolded-app"}\n');
+    Deno.env.set("VERYFRONT_API_TOKEN", "test-token");
+    Deno.env.set("VERYFRONT_API_URL", "https://control.example.test/api");
+    Deno.env.delete("VERYFRONT_PROJECT_SLUG");
+    Deno.env.delete("VERYFRONT_PROJECT_ID");
+    _resetEnvironmentConfig();
+    console.log = (...args: unknown[]) => {
+      logs.push(args.map(String).join(" "));
+    };
+
+    await withMockFetch((input: string | URL | Request, init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      requests.push(`${request.method} ${new URL(request.url).pathname}`);
+      return Promise.resolve(Response.json({ message: "not found" }, { status: 404 }));
+    }, () =>
+      deployCommand({
+        projectDir,
+        branch: "main",
+        env: "production",
+        dryRun: true,
+        force: true,
+        quiet: false,
+        inferredProject: "create",
+      }));
+
+    assertEquals(requests, []);
+    assertEquals(
+      logs.some((line) => line.includes("for project scaffolded-app")),
+      true,
+    );
+  } finally {
+    console.log = originalLog;
+    envKeys.forEach((key, index) => {
+      const value = savedEnv[index];
+      if (value === undefined) Deno.env.delete(key);
+      else Deno.env.set(key, value);
+    });
+    _resetEnvironmentConfig();
+    await Deno.remove(projectDir, { recursive: true });
+  }
+});
+
+it("exits 2 with a usage error for an unlinked folder in JSON mode", async () => {
+  const projectDir = await Deno.makeTempDir();
+  const envKeys = [
+    "VERYFRONT_API_TOKEN",
+    "VERYFRONT_API_URL",
+    "VERYFRONT_PROJECT_SLUG",
+    "VERYFRONT_PROJECT_ID",
+  ];
+  const savedEnv = envKeys.map((key) => Deno.env.get(key));
+  const output: string[] = [];
+  const originalLog = console.log;
+  const originalExit = Deno.exit;
+
+  try {
+    await Deno.writeTextFile(`${projectDir}/package.json`, '{"name":"unlinked-app"}\n');
+    Deno.env.set("VERYFRONT_API_TOKEN", "test-token");
+    Deno.env.set("VERYFRONT_API_URL", "https://control.example.test/api");
+    Deno.env.delete("VERYFRONT_PROJECT_SLUG");
+    Deno.env.delete("VERYFRONT_PROJECT_ID");
+    _resetEnvironmentConfig();
+    setJsonMode(true);
+    console.log = (...args: unknown[]) => {
+      output.push(args.map(String).join(" "));
+    };
+    Deno.exit = ((code?: number): never => {
+      throw new Error(`Deno.exit(${code ?? 0})`);
+    }) as typeof Deno.exit;
+
+    await withMockFetch(
+      () => Promise.resolve(Response.json({ message: "not found" }, { status: 404 })),
+      () =>
+        assertRejects(
+          () =>
+            deployCommand({
+              projectDir,
+              branch: "main",
+              env: "production",
+              dryRun: false,
+              force: true,
+              quiet: true,
+            }),
+          Error,
+          "Deno.exit(2)",
+        ),
+    );
+
+    const result = output.map((line) => JSON.parse(line)).at(-1);
+    assertEquals(result.success, false);
+    assertEquals(result.errorDetails.code, "USAGE_ERROR");
+    assertEquals(result.errorDetails.slug, "invalid-argument");
+    assertEquals(
+      result.error,
+      "No Veryfront project is linked to this folder. Run veryfront up to create one, or pass --project <slug> to deploy an existing project.",
+    );
+  } finally {
+    console.log = originalLog;
+    Deno.exit = originalExit;
+    setJsonMode(false);
+    envKeys.forEach((key, index) => {
+      const value = savedEnv[index];
+      if (value === undefined) Deno.env.delete(key);
+      else Deno.env.set(key, value);
+    });
+    _resetEnvironmentConfig();
+    await Deno.remove(projectDir, { recursive: true });
+  }
+});
+
 it("refuses an inferred first deploy without creating a project or a link", async () => {
   const projectDir = await Deno.makeTempDir();
   const envKeys = [
